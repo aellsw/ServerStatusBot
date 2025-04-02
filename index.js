@@ -1,10 +1,21 @@
 require("dotenv").config();
-const { Client, GatewayIntentBits, EmbedBuilder } = require("discord.js");
+const {
+    Client,
+    GatewayIntentBits,
+    EmbedBuilder,
+    PermissionFlagsBits,
+    REST,
+    Routes,
+    ApplicationCommandType,
+    InteractionType,
+    ApplicationCommandOptionType
+} = require("discord.js");
 const { sendRconCommand } = require("./rcon");
 
 // Environment Variables
 const TOKEN = process.env.DISCORD_TOKEN;
 const STATUS_CHANNEL_ID = process.env.STATUS_CHANNEL_ID;
+const CLIENT_ID = process.env.CLIENT_ID; // Add this to your .env
 
 const client = new Client({
     intents: [
@@ -19,6 +30,42 @@ const client = new Client({
 // Track if we're in restart mode
 let isInRestartMode = false;
 let restartTimer = null;
+
+// Command registration
+const rest = new REST({ version: '10' }).setToken(TOKEN);
+
+// Define the slash command
+const commands = [
+    {
+        name: 'update',
+        description: 'Update the server status information',
+        type: ApplicationCommandType.ChatInput,
+        default_member_permissions: (1 << 3).toString(), // Administrator permission
+    }
+];
+
+// Function to deploy commands to guilds the bot is in
+async function deployCommands() {
+    try {
+        console.log('Started refreshing application (/) commands.');
+
+        // Get all guilds the bot is in
+        const guilds = client.guilds.cache;
+
+        // For each guild, register the commands
+        for (const [guildId, guild] of guilds) {
+            await rest.put(
+                Routes.applicationGuildCommands(CLIENT_ID, guildId),
+                { body: commands },
+            );
+            console.log(`Successfully registered commands for guild ${guild.name} (${guildId})`);
+        }
+
+        console.log('Successfully reloaded application (/) commands.');
+    } catch (error) {
+        console.error('Error deploying commands:', error);
+    }
+}
 
 // Function to update server status and player data
 async function updateServerStatus() {
@@ -178,6 +225,7 @@ async function updateServerStatus() {
             }
 
             console.log(`✅ Server status updated at ${now.toLocaleString()}`);
+            return true; // Indicate success
 
         } catch (rconError) {
             // RCON connection failed - server is likely offline
@@ -230,10 +278,12 @@ async function updateServerStatus() {
             }
 
             console.error(`❌ Server appears to be offline at ${now.toLocaleString()}:`, rconError);
+            return false; // Indicate failure
         }
 
     } catch (error) {
         console.error("❌ Unexpected error in update process:", error);
+        return false; // Indicate failure
     }
 }
 
@@ -304,9 +354,56 @@ async function checkServerDuringRestart() {
     }
 }
 
+// Handle slash commands
+client.on('interactionCreate', async interaction => {
+    // Only handle slash commands
+    if (!interaction.isCommand()) return;
+
+    const { commandName } = interaction;
+
+    // Handle the update command
+    if (commandName === 'update') {
+        // Check for administrator permission
+        if (!interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) {
+            return interaction.reply({
+                content: '❌ You need administrator permissions to use this command.',
+                ephemeral: true
+            });
+        }
+
+        try {
+            // Defer the reply to give us time to process
+            await interaction.deferReply();
+
+            // Perform status update
+            const success = await updateServerStatus();
+
+            // Reply based on result
+            if (success) {
+                await interaction.editReply('✅ Server status updated successfully!');
+            } else {
+                await interaction.editReply('⚠️ Status update completed, but the server appears to be offline.');
+            }
+        } catch (error) {
+            console.error('Error handling update command:', error);
+            if (interaction.deferred || interaction.replied) {
+                await interaction.editReply('❌ An error occurred while updating the server status.');
+            } else {
+                await interaction.reply({
+                    content: '❌ An error occurred while updating the server status.',
+                    ephemeral: true
+                });
+            }
+        }
+    }
+});
+
 // Bot Ready Event
 client.once("ready", async () => {
     console.log(`✅ Logged in as ${client.user.tag}`);
+
+    // Deploy commands to all guilds the bot is in
+    await deployCommands();
 
     // Initial update
     await updateServerStatus();
