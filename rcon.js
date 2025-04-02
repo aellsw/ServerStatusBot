@@ -5,25 +5,25 @@ const RCON_IP = process.env.RCON_IP;
 const RCON_PORT = parseInt(process.env.RCON_PORT);
 const RCON_PASSWORD = process.env.RCON_PASSWORD;
 const TIMEOUT = 20000; // 20 seconds timeout
-const RETRY_ATTEMPTS = 2; // Number of retry attempts for connection issues
 
-async function sendRconCommand(retryCount = 0) {
+async function sendRconCommand() {
     return new Promise((resolve, reject) => {
         const client = new net.Socket();
         let responseData = "";
         let loggedIn = false;
-        let responseReceived = false; // ✅ Track if response has been received
-        let responseTimer = null;
 
         client.setTimeout(TIMEOUT);
 
         client.connect(RCON_PORT, RCON_IP, () => {
             console.log(`Connected to RCON server (${RCON_IP}:${RCON_PORT}). Sending login...`);
-            client.write(Buffer.concat([
-                Buffer.from([0x01]),
+
+            const loginPayload = Buffer.concat([
+                Buffer.from([0x01]), // Login packet type
                 Buffer.from(RCON_PASSWORD, "utf-8"),
-                Buffer.from([0x00])
-            ]));
+                Buffer.from([0x00]) // Null terminator
+            ]);
+
+            client.write(loginPayload);
         });
 
         client.on("data", (data) => {
@@ -35,79 +35,39 @@ async function sendRconCommand(retryCount = 0) {
 
                 setTimeout(() => {
                     console.log("Requesting player data");
-                    client.write(Buffer.concat([
-                        Buffer.from([0x02, 0x77]),
+                    const commandBuffer = Buffer.concat([
+                        Buffer.from([0x02, 0x77]), // RCON_GETPLAYERDATA (0x77)
                         Buffer.from([0x00])
-                    ]));
-
-                    responseTimer = setTimeout(() => {
-                        console.log("Response timeout - ending connection");
-                        client.end();
-                        resolve({ uniqueIds: [], playerDetails: [] });
-                    }, 5000);
+                    ]);
+                    client.write(commandBuffer);
                 }, 500);
-            } else if (loggedIn) {
-                clearTimeout(responseTimer);
-
-                if (responseData.includes("PlayerDataName") || responseData.includes("Name:")) {
-                    responseReceived = true; // ✅ Mark response as received
-                    const playerList = extractPlayerList(responseData);
-                    client.end();
-                    resolve(playerList);
-                }
+            } else {
+                const playerList = extractPlayerList(responseData);
+                client.end();
+                resolve(playerList);
             }
         });
 
         client.on("error", (err) => {
             client.destroy();
-            clearTimeout(responseTimer);
-
-            if (retryCount < RETRY_ATTEMPTS && !responseReceived) { // ✅ Only retry if no data received
-                console.log(`RCON connection error (attempt ${retryCount + 1}): ${err.message}. Retrying...`);
-                setTimeout(() => {
-                    sendRconCommand(retryCount + 1).then(resolve).catch(reject);
-                }, 2000);
-            } else {
-                reject(`RCON connection failed after ${retryCount + 1} attempts: ${err.message}`);
-            }
+            reject(err.message);
         });
 
         client.on("timeout", () => {
             client.destroy();
-            clearTimeout(responseTimer);
-
-            if (retryCount < RETRY_ATTEMPTS && !responseReceived) { // ✅ Stop retrying if data was received
-                console.log(`RCON connection timeout (attempt ${retryCount + 1}). Retrying...`);
-                setTimeout(() => {
-                    sendRconCommand(retryCount + 1).then(resolve).catch(reject);
-                }, 2000);
-            } else {
-                reject(`RCON connection timed out after ${retryCount + 1} attempts`);
-            }
-        });
-
-        client.on("end", () => {
-            clearTimeout(responseTimer);
-            console.log("RCON connection closed");
+            reject("Timeout occurred");
         });
     });
 }
 
 function extractPlayerList(response) {
-    //console.log("Raw Server Response:", response);
+    console.log("Raw Server Response:", response);
 
-    // ✅ Handle "No Players Connected" case
-    if (response.includes("No Players Connected")) {
-        return {
-            uniqueIds: [],
-            playerDetails: []
-        };
-    }
-
+    // Initialize arrays and sets here
     const uniqueIds = new Set();
     const playerDetails = [];
 
-    // ✅ Improved regex to capture **ALL** player formats
+    // Improved regex to capture all player formats
     const playerRegex = /(?:PlayerDataName|Name):\s*([^,]+),\s*PlayerID:\s*(\d+),\s*Location:[^,]+,\s*Class:\s*([^,\s]+)/g;
 
     let match;
@@ -116,7 +76,7 @@ function extractPlayerList(response) {
         const name = rawName.replace(/['"]/g, '').trim(); // Remove unwanted characters
 
         if (name && id) {
-            // ✅ Avoid duplicate players
+            // Avoid duplicate players
             if (!uniqueIds.has(id)) {
                 uniqueIds.add(id);
                 playerDetails.push({
@@ -134,7 +94,8 @@ function extractPlayerList(response) {
 
     return {
         uniqueIds: Array.from(uniqueIds),
-        playerDetails: playerDetails
+        playerDetails: playerDetails,
+        totalPlayers: playerDetails.length
     };
 }
 
